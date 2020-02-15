@@ -414,14 +414,37 @@ SR_PRIV int rigol_ds_capture_start(const struct sr_dev_inst *sdi)
 				else
 				{
 					/* The DS1000Z series has a fixed memory depth which we
-					 * need to divide correctly according to the number of
-					 * active channels. */
-					devc->analog_frame_size = devc->digital_frame_size =
-						num_channels == 1 ?
+					 * need to divide correctly according to some parameters. */
+				  const uint64_t max_mdepth = num_channels == 1 ?
 							buffer_samples :
-								num_channels == 2 ?
-									buffer_samples / 2 :
-									buffer_samples / 4;
+							num_channels == 2 ?
+							buffer_samples / 2 :
+							buffer_samples / 4;
+
+				  char *current_mdepth_string;
+				  if (sr_scpi_get_string(sdi->conn, "ACQ:MDEP?", &current_mdepth_string) != SR_OK)
+				    return SR_ERR;
+
+				  // If MDEP is auto, compute it.
+				  if (strcmp(current_mdepth_string, "AUTO") == 0) {
+
+				    float samplerate;
+				    if (sr_scpi_get_float(sdi->conn, "ACQ:SRAT?", &samplerate) != SR_OK)
+				      return SR_ERR;
+
+				    float wavelength = devc->timebase * (float)devc->model->series->num_horizontal_divs;
+				    uint64_t mdepth = samplerate * wavelength;
+				    devc->analog_frame_size = devc->digital_frame_size = MIN(mdepth, max_mdepth);
+				  } else {
+				    if (sr_scpi_get_int(sdi->conn, "ACQ:MDEP?", &buffer_samples) != SR_OK)
+				    {
+				      g_free(current_mdepth_string);
+				      return SR_ERR;
+				    }
+
+				    devc->analog_frame_size = devc->digital_frame_size =
+				      buffer_samples;
+				  }
 				}
 			}
 
@@ -748,8 +771,8 @@ SR_PRIV int rigol_ds_receive(int fd, int revents, void *cb_data)
 	if (devc->num_block_read == devc->num_block_bytes) {
 		sr_dbg("Block has been completed");
 		if (devc->model->series->protocol >= PROTOCOL_V3) {
-			/* Discard the terminating linefeed */
-			sr_scpi_read_data(scpi, (char *)devc->buffer, 1);
+			/* Discard the terminating linefeed, and read one more to trigger sr_scpi_read_complete */
+			sr_scpi_read_data(scpi, (char *)devc->buffer, 2);
 		}
 		if (devc->format == FORMAT_IEEE488_2) {
 			/* Prepare for possible next block */
