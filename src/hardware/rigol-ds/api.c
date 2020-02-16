@@ -498,7 +498,11 @@ static int analog_frame_size(const struct sr_dev_inst *sdi)
 	case DATA_SOURCE_LIVE:
 		return devc->model->series->live_samples;
 	case DATA_SOURCE_MEMORY:
-		return devc->model->series->buffer_samples / analog_channels;
+		return analog_channels == 1 ?
+		       devc->model->series->buffer_samples :
+		       analog_channels == 2 ?
+		       devc->model->series->buffer_samples / 2 :
+		       devc->model->series->buffer_samples / 4;
 	default:
 		return 0;
 	}
@@ -527,6 +531,7 @@ static int config_get(uint32_t key, GVariant **data,
 	uint64_t samplerate;
 	int analog_channel = -1;
 	float smallest_diff = INFINITY;
+	float samplerate_float;
 	int idx = -1;
 	unsigned i;
 
@@ -568,14 +573,22 @@ static int config_get(uint32_t key, GVariant **data,
 			*data = g_variant_new_string("Segmented");
 		break;
 	case SR_CONF_SAMPLERATE:
-		if (devc->data_source == DATA_SOURCE_LIVE) {
-			samplerate = analog_frame_size(sdi) /
-				(devc->timebase * devc->model->series->num_horizontal_divs);
-			*data = g_variant_new_uint64(samplerate);
-		} else {
-			sr_dbg("Unknown data source: %d.", devc->data_source);
-			return SR_ERR_NA;
+		switch (devc->data_source) {
+			case DATA_SOURCE_LIVE:
+				samplerate = devc->model->series->live_samples
+					/ (devc->timebase * devc->model->series->num_horizontal_divs);
+				break;
+			case DATA_SOURCE_MEMORY:
+				if (sr_scpi_get_float(sdi->conn, "ACQ:SRAT?", &samplerate_float) != SR_OK)
+					return SR_ERR;
+
+				samplerate = samplerate_float;
+				break;
+			default:
+				sr_dbg("Unknown data source: %d.", devc->data_source);
+				return SR_ERR_NA;
 		}
+		*data = g_variant_new_uint64(samplerate);
 		break;
 	case SR_CONF_TRIGGER_SOURCE:
 		if (!strcmp(devc->trigger_source, "ACL"))
