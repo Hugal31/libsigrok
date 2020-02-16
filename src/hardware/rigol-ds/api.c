@@ -43,7 +43,7 @@ static const uint32_t drvopts[] = {
 
 static const uint32_t devopts[] = {
 	SR_CONF_LIMIT_FRAMES | SR_CONF_SET,
-	SR_CONF_SAMPLERATE | SR_CONF_GET,
+	SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_TIMEBASE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_NUM_HDIV | SR_CONF_GET,
 	SR_CONF_HORIZ_TRIGGERPOS | SR_CONF_SET,
@@ -124,6 +124,13 @@ static const uint64_t vdivs[][2] = {
 	{ 20, 1 },
 	{ 50, 1 },
 	{ 100, 1 },
+};
+
+static const uint64_t memory_depths[] = {
+	12000,
+	120000,
+	1200000,
+	24000000 // Note: in option
 };
 
 static const char *trigger_sources_2_chans[] = {
@@ -477,8 +484,7 @@ static int dev_close(struct sr_dev_inst *sdi)
 
 	return sr_scpi_close(scpi);
 }
-
-static int analog_frame_size(const struct sr_dev_inst *sdi)
+static int analog_channels_enabled(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc = sdi->priv;
 	struct sr_channel *ch;
@@ -490,6 +496,14 @@ static int analog_frame_size(const struct sr_dev_inst *sdi)
 		if (ch->type == SR_CHANNEL_ANALOG && ch->enabled)
 			analog_channels++;
 	}
+
+	return analog_channels;
+}
+
+static int analog_frame_size(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc = sdi->priv;
+	int analog_channels = analog_channels_enabled(sdi);
 
 	if (analog_channels == 0)
 		return 0;
@@ -796,6 +810,22 @@ static int config_set(uint32_t key, GVariant *data,
 			return SR_ERR;
 		}
 		break;
+	  case SR_CONF_SAMPLERATE:
+	    if (devc->data_source == DATA_SOURCE_MEMORY) {
+	      p = g_variant_get_uint64(data);
+
+	      float wavelength = devc->timebase * devc->model->series->num_horizontal_divs;
+	      const uint64_t max_mdepth = analog_frame_size(sdi);
+	      float mdepth_float = p * wavelength;
+	      uint64_t mdepth = MIN(mdepth_float, max_mdepth);
+
+	      if (rigol_ds_config_set(sdi, "ACQ:MDEP %d", mdepth) != SR_OK)
+	        return SR_ERR;
+
+	      devc->analog_frame_size = devc->digital_frame_size = mdepth;
+	    } else
+	      return SR_ERR_NA;
+	    break;
 	default:
 		return SR_ERR_NA;
 	}
@@ -876,6 +906,38 @@ static int config_list(uint32_t key, GVariant **data,
 		default:
 			*data = g_variant_new_strv(ARRAY_AND_SIZE(data_sources));
 			break;
+		}
+		break;
+	case SR_CONF_SAMPLERATE:
+		if (devc && devc->model->series->protocol >= PROTOCOL_V4) {
+			int analog_channels = analog_channels_enabled(sdi);
+			if (analog_channels == 0)
+				return SR_ERR_NA;
+			uint64_t multiplexing_divisor = analog_channels == 1
+					   ? 1
+					   : (analog_channels == 2 ? 2 : 4);
+
+			gsize length = sizeof(memory_depths) / sizeof(memory_depths[0]);
+			GVariant **samplerates = g_malloc(length * sizeof(GVariant*));
+
+			float wavelength = devc->timebase * devc->model->series->num_horizontal_divs;
+
+			for (gsize i = 0; i < length; ++i) {
+				uint64_t mdepth = memory_depths[i] / multiplexing_divisor;
+				uint64_t samplerate = mdepth / wavelength;
+				samplerates[i] = g_variant_new_uint64(samplerate);
+			}
+
+			GVariant *gvar;
+			GVariantBuilder gvb;
+
+			g_variant_builder_init(&gvb, G_VARIANT_TYPE("a{sv}"));
+			gvar = g_variant_new_array(G_VARIANT_TYPE("t"), samplerates, length);
+			g_variant_builder_add(&gvb, "{sv}", "samplerates", gvar);
+
+			*data = g_variant_builder_end(&gvb);
+		} else {
+			return SR_ERR_NA;
 		}
 		break;
 	default:
